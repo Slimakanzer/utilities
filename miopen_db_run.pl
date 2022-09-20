@@ -77,27 +77,27 @@ while (<$handle>) {
         my $dtype  = $17;
         my $dir    = $18;
 
+        my $dir_val = 1;
+        if    ($dir eq "B") {
+            # Reverse back due to genius MIOpeners reverses tensor in difference places
+            ($W, $out_w) = ($out_w, $W);
+            ($H, $out_h) = ($out_h, $H);
+            ($C, $K) = ($K, $C);
+            $dir_val = 2;
+        }
+        elsif ($dir eq "W") {
+            # Reverse back due to genius MIOpeners reverses tensor in difference places
+            ($W, $out_w) = ($out_w, $W);
+            ($H, $out_h) = ($out_h, $H);
+            ($C, $K) = ($K, $C);
+            $dir_val = 4;
+        }
+
         my ($is_valid, $solver_type, $solver_name, $time, $workspace_sz, $msg) = check_case($C, $H, $W, $fil_h, $fil_w, $K, $out_h, $out_w, $N, $pad_h, $pad_w, $ostride_h, $ostride_w, $dstride_h, $dstride_w, $layout, $dtype, $dir);
 
         if ($is_valid) {
             $applicable_count++;
             next if ($applicable_count <= $skip_first);
-
-            my $dir_val = 1;
-            if    ($dir eq "B") {
-                # Reverse back due to genius MIOpeners reverses tensor in difference places
-                ($W, $out_w) = ($out_w, $W);
-                ($H, $out_h) = ($out_h, $H);
-                ($C, $K) = ($K, $C);
-                $dir_val = 2;
-            }
-            elsif ($dir eq "W") {
-                # Reverse back due to genius MIOpeners reverses tensor in difference places
-                ($W, $out_w) = ($out_w, $W);
-                ($H, $out_h) = ($out_h, $H);
-                ($C, $K) = ($K, $C);
-                $dir_val = 4;
-            }
             
             my $case_params = "convfp16 -c $C -H $W -W $W -y $fil_h -x $fil_w -k $K -n $N -p $pad_h -q $pad_w -u $ostride_h -v $ostride_w -l $dstride_h -j $dstride_w -F $dir_val";
 
@@ -135,27 +135,17 @@ sub check_case {
     my $solver_name  = "ConvBinWinogradUltraRxSf2x3";
     my $solver_type  = "miopenConvolutionFwdAlgoWinograd";
 
-    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") if $layout ne "NCHW" or $dtype ne "FP16";
-    return (0, "", $solver_name, 0, 0, "Stride or dilations must be equal to 1")                 if $ostride_h != 1 or $ostride_w != 1 or $dstride_h != 1 or $dstride_w != 1;
-
     if    ($dir eq "B") {
-        # Do not reverse due to genius MIOpeners reverses tensor in different places
-        # ($W, $out_w) = ($out_w, $W);
-        # ($H, $out_h) = ($out_h, $H);
-        # ($C, $K) = ($K, $C);
-
         $pad_w = $fil_w * $fstride_w - $pad_w - 1;
         $pad_h = $fil_h * $fstride_h - $pad_h - 1;
+        ($W, $out_w) = ($out_w, $W);
+        ($H, $out_h) = ($out_h, $H);
         ($dstride_w, $ostride_w) = ($ostride_w, $dstride_w);
         ($dstride_h, $ostride_h) = ($ostride_h, $dstride_h);
+        ($C, $K) = ($K, $C);
         $solver_type = "miopenConvolutionBwdDataAlgoWinograd";
     }
     elsif ($dir eq "W") {
-        # reverse back due to genius MIOpeners reverses tensor in difference places
-        ($W, $out_w) = ($out_w, $W);
-        ($H, $out_h) = ($out_h, $H);
-        ($C, $K) = ($K, $C);
-
         ($fil_w, $out_w) = ($out_w, $fil_w);
         ($fil_h, $out_h) = ($out_h, $fil_h);
         ($fstride_w, $ostride_w) = ($ostride_w, $fstride_w);
@@ -166,6 +156,9 @@ sub check_case {
     elsif ($dir ne "F") {
         return (0, "", $solver_name, 0, 0, "Unknown direction: (dir: $dir)");
     }
+
+    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") if $layout ne "NCHW" or $dtype ne "FP16";
+    return (0, "", $solver_name, 0, 0, "Stride or dilations must be equal to 1")                 if $fstride_w == 1 and $fstride_h == 1 and $ostride_h != 1 or $ostride_w != 1 or $dstride_h != 1 or $dstride_w != 1;
 
     my $o_tile_step_W  = 2;
     my $o_tile_step_H  = 2;
