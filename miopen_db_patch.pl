@@ -90,11 +90,6 @@ while (<$handle>) {
             ($H, $out_h) = ($out_h, $H);
             ($C, $K) = ($K, $C);
         }
-
-        my $type_val = "fp16";
-        if ($dtype eq "FP16") {
-            $type_val = "fp16";
-        }
         
         my ($is_valid, $solver_type, $solver_name, $time, $workspace_sz, $msg) = check_case($C, $H, $W, $fil_h, $fil_w, $K, $out_h, $out_w, $N, $pad_h, $pad_w, $ostride_h, $ostride_w, $dstride_h, $dstride_w, $layout, $dtype, $dir);
 
@@ -149,7 +144,7 @@ sub check_case {
         return (0, "", $solver_name, 0, 0, "Unknown direction: (dir: $dir)");
     }
 
-    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") unless $layout eq "NCHW";
+    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") unless $layout eq "NCHW" and ($dtype eq "FP16" or $dtype eq "FP32");
     return (0, "", $solver_name, 0, 0, "Stride or dilations must be equal to 1")                 unless $fstride_w == 1 and $fstride_h == 1 and $ostride_h == 1 and $ostride_w == 1 and $dstride_h == 1 and $dstride_w == 1;
 
     my $o_tile_step_W  = 2;
@@ -185,7 +180,7 @@ sub check_case {
         && $O_STEP_1_PITCH < 2**18
         && $D_STEP_2_PITCH < 2**30
         && $O_STEP_2_PITCH < 2**30)) {
-        return (0, "", $solver_name, 0, 0, "Don't fit to Winograd Ultra v1_1_3 applicability");
+        return (0, "", $solver_name, 0, 0, "Don't fit to Winograd Ultra v1_0_14 applicability");
     }
 
     my $group_size   = 64;

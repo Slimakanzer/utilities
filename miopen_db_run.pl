@@ -78,19 +78,24 @@ while (<$handle>) {
         my $dir    = $18;
 
         my $dir_val = 1;
-        if    ($dir eq "B") {
-            # Reverse back due to genius MIOpeners reverses tensor in difference places
+        if ($dir eq "B") {
+            $dir_val = 2;
+            # reverse due to genius MIOpeners reverses tensor in different places
             ($W, $out_w) = ($out_w, $W);
             ($H, $out_h) = ($out_h, $H);
             ($C, $K) = ($K, $C);
-            $dir_val = 2;
         }
         elsif ($dir eq "W") {
-            # Reverse back due to genius MIOpeners reverses tensor in difference places
+            $dir_val = 4;
+            # reverse due to genius MIOpeners reverses tensor in different places
             ($W, $out_w) = ($out_w, $W);
             ($H, $out_h) = ($out_h, $H);
             ($C, $K) = ($K, $C);
-            $dir_val = 4;
+        }
+
+        my $type_val = "";
+        if ($dtype eq "FP16") {
+            $type_val = "fp16";
         }
 
         my ($is_valid, $solver_type, $solver_name, $time, $workspace_sz, $msg) = check_case($C, $H, $W, $fil_h, $fil_w, $K, $out_h, $out_w, $N, $pad_h, $pad_w, $ostride_h, $ostride_w, $dstride_h, $dstride_w, $layout, $dtype, $dir);
@@ -99,7 +104,7 @@ while (<$handle>) {
             $applicable_count++;
             next if ($applicable_count <= $skip_first);
             
-            my $case_params = "convfp16 -c $C -H $W -W $W -y $fil_h -x $fil_w -k $K -n $N -p $pad_h -q $pad_w -u $ostride_h -v $ostride_w -l $dstride_h -j $dstride_w -F $dir_val";
+            my $case_params = "conv$type_val -c $C -H $W -W $W -y $fil_h -x $fil_w -k $K -n $N -p $pad_h -q $pad_w -u $ostride_h -v $ostride_w -l $dstride_h -j $dstride_w -F $dir_val";
 
             my $case = "Case $applicable_count\n$case_params\n";
             print $handle_out "$case";
@@ -135,7 +140,7 @@ sub check_case {
     my $solver_name  = "ConvBinWinogradUltraRxSf2x3";
     my $solver_type  = "miopenConvolutionFwdAlgoWinograd";
 
-    if    ($dir eq "B") {
+    if ($dir eq "B") {
         $pad_w = $fil_w * $fstride_w - $pad_w - 1;
         $pad_h = $fil_h * $fstride_h - $pad_h - 1;
         ($W, $out_w) = ($out_w, $W);
@@ -157,8 +162,8 @@ sub check_case {
         return (0, "", $solver_name, 0, 0, "Unknown direction: (dir: $dir)");
     }
 
-    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") if $layout ne "NCHW" or $dtype ne "FP16";
-    return (0, "", $solver_name, 0, 0, "Stride or dilations must be equal to 1")                 if $fstride_w == 1 and $fstride_h == 1 and $ostride_h != 1 or $ostride_w != 1 or $dstride_h != 1 or $dstride_w != 1;
+    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") unless $layout eq "NCHW" and ($dtype eq "FP16" or $dtype eq "FP32");
+    return (0, "", $solver_name, 0, 0, "Stride or dilations must be equal to 1")                 unless $fstride_w == 1 and $fstride_h == 1 and $ostride_h == 1 and $ostride_w == 1 and $dstride_h == 1 and $dstride_w == 1;
 
     my $o_tile_step_W  = 2;
     my $o_tile_step_H  = 2;
@@ -193,11 +198,11 @@ sub check_case {
         && $O_STEP_1_PITCH < 2**18
         && $D_STEP_2_PITCH < 2**30
         && $O_STEP_2_PITCH < 2**30)) {
-        return (0, "", $solver_name, 0, 0, "Don't fit to Winograd Ultra v1_1_3 applicability");
+        return (0, "", $solver_name, 0, 0, "Don't fit to Winograd Ultra v1_0_14 applicability");
     }
 
     my $group_size   = 64;
-    my $workspace_sz = 4 * round_up_mul($N * round_up_mul($out_h, $o_tile_step_H) * round_up_mul($out_w, $o_tile_step_W) / ($o_tile_step_H * $o_tile_step_W), $group_size);
+    my $workspace_sz = 4 * $N * round_up_mul(ceil($out_h, $o_tile_step_H) * ceil($out_w, $o_tile_step_W), $group_size);
 
     return (1, $solver_type, $solver_name, $patched_time, $workspace_sz, "None");
 }
