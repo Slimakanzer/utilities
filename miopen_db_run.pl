@@ -112,7 +112,7 @@ while (<$handle>) {
 
             my $log = qx "$app $case_params $extra_params 2>&1";
             
-            my $is_verified = $log =~ /Verifies\s+OK\s+on\s+CPU/;
+            my $is_verified = $log =~ /Verifies\s+OK\s+on\s+(CPU|GPU)/;
             my ($id, $solution) = ($log =~ m/Solution:\s+(\d+)\/(\w+)/);
             $solution = "Unknown" unless defined $solution;
 
@@ -162,7 +162,8 @@ sub check_case {
         return (0, "", $solver_name, 0, 0, "Unknown direction: (dir: $dir)");
     }
 
-    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") unless $layout eq "NCHW" and ($dtype eq "FP16" or $dtype eq "FP32");
+    return (0, "", $solver_name, 0, 0, "WRW") if $dir eq "W";
+    return (0, "", $solver_name, 0, 0, "Layout and data type: (layout: $layout, dtype: $dtype)") unless $layout eq "NCHW" and ($dtype eq "FP16");
     return (0, "", $solver_name, 0, 0, "Stride or dilations must be equal to 1")                 unless $fstride_w == 1 and $fstride_h == 1 and $ostride_h == 1 and $ostride_w == 1 and $dstride_h == 1 and $dstride_w == 1;
 
     my $o_tile_step_W  = 2;
@@ -202,14 +203,21 @@ sub check_case {
     }
 
     my $group_size   = 64;
-    my $workspace_sz = 4 * $N * round_up_mul(ceil($out_h, $o_tile_step_H) * ceil($out_w, $o_tile_step_W), $group_size);
+    my $workspace_sz; 
+    
+    if ($D_STEP_2_PITCH >= 2**23 or $O_STEP_2_PITCH >= 2**23) {
+        $workspace_sz = 4 * $N * round_up_mul(ceil($out_h, $o_tile_step_H) * ceil($out_w, $o_tile_step_W), $group_size);
+    } 
+    else {
+        $workspace_sz = 4 * round_up_mul($N * ceil($out_h, $o_tile_step_H) * ceil($out_w, $o_tile_step_W), $group_size);
+    }
 
     return (1, $solver_type, $solver_name, $patched_time, $workspace_sz, "None");
 }
 
 sub ceil {
     my ($v, $f) = (@_);
-    return ($v + $f - 1) / $f;
+    return int(($v + $f - 1) / $f);
 }
 
 sub round_up_mul
