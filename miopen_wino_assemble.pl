@@ -23,7 +23,7 @@ my $header = << "ENDOFHEADER";
  *
  * MIT License
  *
- * Copyright (c) 2022 Advanced Micro Devices, Inc.
+ * Copyright (c) 2023 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -45,6 +45,13 @@ my $header = << "ENDOFHEADER";
  *
  *******************************************************************************/
 ENDOFHEADER
+
+my $gfx10_quad_perm_workaround = << "ENDOFWORKAROUND";
+.macro _v_pk_fmac_f16_gfx10_quad_perm vdst:req, vsrc0:req, vsrc1:req, q0:req, q1:req, q2:req, q3:req
+    .long  0x780000FA + ((\\vdst << 17) + (\\vsrc1 << 9))
+    .long  0xFF000000 + (\\vsrc0 + (\\q0 << 8) + (\\q1 << 10) + (\\q2 << 12) + (\\q3 << 14))
+.endm
+ENDOFWORKAROUND
 
 my $clang="/opt/rocm/llvm/bin/clang";
 my $objdump="/opt/rocm/llvm/bin/llvm-objdump";
@@ -79,31 +86,31 @@ foreach my $src_path (@sources) {
 
         my $group = 0;
         my $mcpu = "";
+        my $mcpu_config = "";
         my $file_name = basename($src_path);
         my $prefix = "";
+        my $enable_gfx10_quad_perm_workaround = 0;
 
         if ($file_name =~ /VEGA20/) {
-            $mcpu = "gfx906";
+            next;
+            $mcpu = "gfx90a";
             $file_name =~ s/VEGA20//;
             $prefix = "gfx9";
+            $mcpu_config = ":sramecc+:xnack-";
         }
-        elsif ($file_name =~ /MI200/) {
-            $mcpu = "gfx90a";
-            $file_name =~ s/MI200//;
-            $prefix = "gfx90a";
-        }
-        elsif ($file_name =~ /NAVI14/) {
+        elsif ($file_name =~ /NAVI21/) {
             $mcpu = "gfx1030";
-            $file_name =~ s/NAVI14//;
+            $file_name =~ s/NAVI21//;
             $prefix = "gfx10";
+        }
+        elsif ($file_name =~ /GFX11/) {
+            next;
+            $mcpu = "gfx1100";
+            $file_name =~ s/GFX11//;
+            $prefix = "gfx11";
         }
         else {
             die "Unknown asic\n";
-        }
-
-        if ($file_name =~ /_f3x2/) {
-            $file_name =~ s/_f3x2//;
-            $prefix .= "_f3x2";
         }
 
         $file_name = $prefix . $file_name;
@@ -113,7 +120,7 @@ foreach my $src_path (@sources) {
             $group = 1;
         }
 
-        $file_name = "Conv_Winograd_v21_1_3_$file_name";
+        $file_name = "Conv_Winograd_v30_2_6_$file_name";
         $file_name =~ s/dot2/_dot2/;
         $file_name =~ s/ostride/stride/;
         $file_name =~ s/dstride/dilation/;
@@ -121,6 +128,8 @@ foreach my $src_path (@sources) {
         $file_name =~ s/\.sp3/_group\.sp3/ if ($group != 0);
         $file_name =~ s/\.sp3/\.tmp\.s/;
         my $gas_filepath = "$out_dir/$file_name";
+
+        $enable_gfx10_quad_perm_workaround = $file_name =~ /gfx10/ && $file_name =~ /fp16_dot2/;
 
         #convert to gas file
         my @gaslines;
@@ -145,7 +154,7 @@ foreach my $src_path (@sources) {
         my $co_filepath = "$out_dir/$file_name";
 
         #compile gas file to co
-        my $cmd = "$clang -x assembler -mcumode -mwavefrontsize64 -target amdgcn--amdhsa -mcpu=$mcpu:sramecc-:xnack- $gas_filepath -o $co_filepath";
+        my $cmd = "$clang -x assembler -mcumode -mwavefrontsize64 -target amdgcn--amdhsa -mcpu=$mcpu$mcpu_config $gas_filepath -o $co_filepath";
         print "$cmd\n";
         my $clang_stdout = qx "$cmd";
         print $clang_stdout;
@@ -159,10 +168,38 @@ foreach my $src_path (@sources) {
         #disassemble code object
         open(my $fh, '>', $disasm_filepath) or die "Could not open file '$disasm_filepath' $!";
         say $fh $header;
-        close($fh);
+        say $fh $gfx10_quad_perm_workaround if $enable_gfx10_quad_perm_workaround;
 
-        $cmd = "$objdump --mattr=-WavefrontSize32,+WavefrontSize64,-xnack,+vop3p,+pk-fmac-f16-inst --mcpu=$mcpu --disassemble --no-leading-addr $co_filepath | sed \"s/\\s*\\/\\/.*//\" | sed \"s/^	//\" | tail +7 >> $disasm_filepath";
-        qx "$cmd";
+        $cmd = "$objdump --mattr=-WavefrontSize32,+WavefrontSize64,-xnack,+vop3p,+pk-fmac-f16-inst --mcpu=$mcpu --disassemble --no-leading-addr $co_filepath | sed \"s/\\s*\\/\\/.*//\" | sed \"s/^	//\" | tail +7";
+        my $disasm_stdout = qx "$cmd";
+        my @disasm_lines = split(/\n/, $disasm_stdout);
+
+        my $i = 0;
+        while ($i < $#disasm_lines) {
+            if ($gfx10_quad_perm_workaround && $disasm_lines[$i] =~ /^.long/ && $disasm_lines[$i+1] =~ /^.long/) {
+                my ($hex1_str) = $disasm_lines[$i]   =~ /.long\s+(0x[0-9a-f]+)/;
+                my ($hex2_str) = $disasm_lines[$i+1] =~ /.long\s+(0x[0-9a-f]+)/;
+                my $hex1 = hex $hex1_str;
+                my $hex2 = hex $hex2_str;
+
+                my $vdst  = ($hex1 & (255 << 17)) >> 17;
+                my $vsrc1 = ($hex1 & (255 << 9)) >> 9;
+                my $vsrc0 = ($hex2 & (255 << 0)) >> 0;
+                my $q0    = ($hex2 & (3 << 8)) >> 8;
+                my $q1    = ($hex2 & (3 << 10)) >> 10;
+                my $q2    = ($hex2 & (3 << 12)) >> 12;
+                my $q3    = ($hex2 & (3 << 14)) >> 14;
+                # print "$hex1_str $hex1, $hex2_str $hex2 -- _v_pk_fmac_f16_gfx10_quad_perm $vdst, $vsrc0, $vsrc1, $q0, $q1, $q2, $q3";
+                say $fh "_v_pk_fmac_f16_gfx10_quad_perm $vdst, $vsrc0, $vsrc1, $q0, $q1, $q2, $q3";
+
+                $i += 2;
+                next;
+            }
+
+            say $fh $disasm_lines[$i];
+            $i++;
+        }
+        close($fh);
         
         print "-- write disasm file:        $file_name\n$cmd\n";
 
@@ -170,7 +207,7 @@ foreach my $src_path (@sources) {
         my $disasm_co_filepath = "$out_dir/$file_name";
 
         #compile disassembled code object
-        $cmd = "$clang -x assembler -mcumode -mwavefrontsize64 -target amdgcn--amdhsa -mcpu=$mcpu:sramecc-:xnack- $disasm_filepath -o $disasm_co_filepath";
+        $cmd = "$clang -x assembler -mcumode -mwavefrontsize64 -target amdgcn--amdhsa -mcpu=$mcpu$mcpu_config $disasm_filepath -o $disasm_co_filepath";
         $clang_stdout = qx "$cmd";
         print $clang_stdout;
         die "\nClang error code $?\n" if ($? != 0);
