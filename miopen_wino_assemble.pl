@@ -53,6 +53,40 @@ my $gfx10_quad_perm_workaround = << "ENDOFWORKAROUND";
 .endm
 ENDOFWORKAROUND
 
+sub gfx10_quad_perm_workaround_wapper {
+    my ($line0, $line1) = (@_);
+
+    my ($hex1_str) = $line0 =~ /.long\s+(0x[0-9a-f]+)/;
+    my ($hex2_str) = $line1 =~ /.long\s+(0x[0-9a-f]+)/;
+    my $hex1 = hex $hex1_str;
+    my $hex2 = hex $hex2_str;
+
+    my $vdst  = ($hex1 & (255 << 17)) >> 17;
+    my $vsrc1 = ($hex1 & (255 << 9)) >> 9;
+    my $vsrc0 = ($hex2 & (255 << 0)) >> 0;
+    my $q0    = ($hex2 & (3 << 8)) >> 8;
+    my $q1    = ($hex2 & (3 << 10)) >> 10;
+    my $q2    = ($hex2 & (3 << 12)) >> 12;
+    my $q3    = ($hex2 & (3 << 14)) >> 14;
+    # print "$hex1_str $hex1, $hex2_str $hex2 -- _v_pk_fmac_f16_gfx10_quad_perm $vdst, $vsrc0, $vsrc1, $q0, $q1, $q2, $q3\n";
+    return "_v_pk_fmac_f16_gfx10_quad_perm $vdst, $vsrc0, $vsrc1, $q0, $q1, $q2, $q3";
+}
+
+my $gfx11_vmad_overlap_workaround = << "ENDOFWORKAROUND";
+.macro _v_mad_u64_u32_gfx11 vdst:req, vsrc0:req, vsrc1:req, vsrc2:req
+    .long  0xD6FE6A00 + (\\vdst << 0)
+    .long  0x00000000 + ((\\vsrc0 + (1 << 8)) << 0) + ((\\vsrc1 + (1 << 8)) << 9) + ((\\vsrc2 + (1 << 8)) << 18)
+.endm
+ENDOFWORKAROUND
+
+sub gfx11_vmad_overlap_workaround_wrapper {
+    my ($line) = (@_);
+    
+    my ($vdst, $vsrc0, $vsrc1, $vsrc2) = $line =~ /v_mad_u64_u32 v\[(\d+):\d+\], vcc, v(\d+), v(\d+), v\[(\d+):\d+\]/;
+    #print "$vdst, $vsrc0, $vsrc1, $vsrc2 -- _v_mad_u64_u32_gfx11 $vdst, $vsrc0, $vsrc1, $vsrc2\n";
+    return "_v_mad_u64_u32_gfx11 $vdst, $vsrc0, $vsrc1, $vsrc2";
+}
+
 my $clang="/opt/rocm/llvm/bin/clang";
 my $objdump="/opt/rocm/llvm/bin/llvm-objdump";
 my $out_dir="";
@@ -90,6 +124,7 @@ foreach my $src_path (@sources) {
         my $file_name = basename($src_path);
         my $prefix = "";
         my $enable_gfx10_quad_perm_workaround = 0;
+        my $enable_gfx11_vmad_overlap_workaround = 0;
 
         if ($file_name =~ /VEGA20/) {
             next;
@@ -104,7 +139,6 @@ foreach my $src_path (@sources) {
             $prefix = "gfx10";
         }
         elsif ($file_name =~ /GFX11/) {
-            next;
             $mcpu = "gfx1100";
             $file_name =~ s/GFX11//;
             $prefix = "gfx11";
@@ -129,7 +163,8 @@ foreach my $src_path (@sources) {
         $file_name =~ s/\.sp3/\.tmp\.s/;
         my $gas_filepath = "$out_dir/$file_name";
 
-        $enable_gfx10_quad_perm_workaround = $file_name =~ /gfx10/ && $file_name =~ /fp16_dot2/;
+        $enable_gfx10_quad_perm_workaround    = $file_name =~ /gfx10/ && $file_name =~ /fp16_dot2/;
+        $enable_gfx11_vmad_overlap_workaround = $file_name =~ /gfx11/;
 
         #convert to gas file
         my @gaslines;
@@ -168,7 +203,8 @@ foreach my $src_path (@sources) {
         #disassemble code object
         open(my $fh, '>', $disasm_filepath) or die "Could not open file '$disasm_filepath' $!";
         say $fh $header;
-        say $fh $gfx10_quad_perm_workaround if $enable_gfx10_quad_perm_workaround;
+        say $fh $gfx10_quad_perm_workaround    if $enable_gfx10_quad_perm_workaround;
+        say $fh $gfx11_vmad_overlap_workaround if $enable_gfx11_vmad_overlap_workaround;
 
         $cmd = "$objdump --mattr=-WavefrontSize32,+WavefrontSize64,-xnack,+vop3p,+pk-fmac-f16-inst --mcpu=$mcpu --disassemble --no-leading-addr $co_filepath | sed \"s/\\s*\\/\\/.*//\" | sed \"s/^	//\" | tail +7";
         my $disasm_stdout = qx "$cmd";
@@ -176,23 +212,14 @@ foreach my $src_path (@sources) {
 
         my $i = 0;
         while ($i < $#disasm_lines) {
-            if ($gfx10_quad_perm_workaround && $disasm_lines[$i] =~ /^.long/ && $disasm_lines[$i+1] =~ /^.long/) {
-                my ($hex1_str) = $disasm_lines[$i]   =~ /.long\s+(0x[0-9a-f]+)/;
-                my ($hex2_str) = $disasm_lines[$i+1] =~ /.long\s+(0x[0-9a-f]+)/;
-                my $hex1 = hex $hex1_str;
-                my $hex2 = hex $hex2_str;
-
-                my $vdst  = ($hex1 & (255 << 17)) >> 17;
-                my $vsrc1 = ($hex1 & (255 << 9)) >> 9;
-                my $vsrc0 = ($hex2 & (255 << 0)) >> 0;
-                my $q0    = ($hex2 & (3 << 8)) >> 8;
-                my $q1    = ($hex2 & (3 << 10)) >> 10;
-                my $q2    = ($hex2 & (3 << 12)) >> 12;
-                my $q3    = ($hex2 & (3 << 14)) >> 14;
-                # print "$hex1_str $hex1, $hex2_str $hex2 -- _v_pk_fmac_f16_gfx10_quad_perm $vdst, $vsrc0, $vsrc1, $q0, $q1, $q2, $q3";
-                say $fh "_v_pk_fmac_f16_gfx10_quad_perm $vdst, $vsrc0, $vsrc1, $q0, $q1, $q2, $q3";
-
+            if ($enable_gfx10_quad_perm_workaround && $disasm_lines[$i] =~ /^.long/ && $disasm_lines[$i+1] =~ /^.long/) {
+                say $fh gfx10_quad_perm_workaround_wapper($disasm_lines[$i], $disasm_lines[$i+1]);
                 $i += 2;
+                next;
+            }
+            if ($enable_gfx11_vmad_overlap_workaround && $disasm_lines[$i] =~ /^v_mad_u64_u32/) {
+                say $fh gfx11_vmad_overlap_workaround_wrapper($disasm_lines[$i]);
+                $i += 1;
                 next;
             }
 
