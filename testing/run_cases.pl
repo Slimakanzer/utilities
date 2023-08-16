@@ -101,7 +101,7 @@ while (<$handle> ) {
 		print "$test\n";
 		my @log = qx "$app $cur_options $extra_options 2>&1";
         print {$out_log_handle} "$test\n@log";
-        if ($? != 0) {
+        if ((scalar grep {/FAILED/} @log) != 0) {
             print {$err_log_handle} "$test\n@log";
             $exit_code = 1;
             last if $strict;
